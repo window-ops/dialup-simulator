@@ -9,7 +9,7 @@ This program is intended to run on Linux only. It uses the terminal curses API a
 ## Requirements
 - Python 3.6 or newer.
 - Standard library only (no pip packages).
-- Recommended: alsa-utils package with 'aplay' on PATH for audible handshake and carrier output. If aplay is missing, the emulator still runs with timing and logs in sync; audio is silent.
+- Recommended: alsa-utils package with 'aplay' on PATH for audible handshake and carrier output. If aplay is missing, the emulator still runs with timing and logs in sync, but the audio is silent.
 
 **Run:** ``python3 dialup.py``
 
