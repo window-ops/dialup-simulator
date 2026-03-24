@@ -1,4 +1,4 @@
-# Dialup
+# Dialup Simulator
 
 **NOTE: THIS PROGRAM HAS BEEN MADE WITH THE ASSISTANCE OF MULTIPLE AIs**
 
