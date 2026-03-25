@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-NOTE: THIS PROGRAM HAS BEEN MADE WITH THE ASSISTANCE OF MULTIPLE AIs
+NOTE: THIS PROGRAM HAS BEEN MADE WITH THE ASSISTANCE OF MULTIPLE AIs.
+THIS PROGRAM WAS TESTED MULTIPLE TIMES DURING DEVELOPMENT.
 
-Dial-up modem emulator (single file) - local two-sided V.90 / ISDN simulation.
+Dial-up modem simulator (single file) - local two-sided V.90 / ISDN simulation.
 
 This program is intended to run on Linux only.  It uses the terminal
 curses API and spawns ALSA 'aplay' via subprocess for real-time PCM;
@@ -950,9 +951,10 @@ def sweep_audio(profile: ModemProfile) -> List[int]:
 
 class AudioPlayer:
     def __init__(self):
-        self.ok  = self._probe()
-        self._q  = queue.Queue(maxsize=24)
-        self._th = threading.Thread(target=self._worker, daemon=True)
+        self.ok   = self._probe()
+        self._q   = queue.Queue(maxsize=24)
+        self._th  = threading.Thread(target=self._worker, daemon=True)
+        self._proc: Optional[subprocess.Popen] = None  # kept so stop() can kill it
 
     def _probe(self) -> bool:
         try:
@@ -982,6 +984,7 @@ class AudioPlayer:
             ['aplay', '-r', str(SR), '-f', 'S16_LE', '-c', '1', '-q',
              '--buffer-time=40000', '-'],
             stdin=subprocess.PIPE)
+        self._proc = proc
         while True:
             try:
                 item = self._q.get(timeout=0.001)
@@ -1015,6 +1018,32 @@ class AudioPlayer:
             except queue.Empty: break
 
     def stop(self):
+        """Kill audio immediately: drain queue, stop worker, terminate aplay."""
+        # 1. Drain buffered PCM so the worker writes nothing more.
+        self.clear()
+        # 2. Signal the worker loop to exit.
+        try: self._q.put_nowait(None)
+        except Exception: pass
+        # 3. Kill aplay hard so its internal buffer never plays out.
+        proc = self._proc
+        if proc is not None:
+            try: proc.terminate()
+            except Exception: pass
+            try: proc.wait(timeout=1.0)
+            except Exception: pass
+        # 4. Wait for the worker thread to finish so no audio escapes after return.
+        if self._th.is_alive():
+            self._th.join(timeout=2.0)
+
+    def silence(self):
+        """
+        Phase-1 shutdown: stop all audio output immediately without touching
+        the aplay process.  Call this while curses is still active (no SIGCHLD
+        risk).  Follow up with stop() once curses has finished its final getch().
+        Draining the queue + closing stdin causes aplay to exit cleanly on its
+        own within ~40 ms -- well before the terminal prompt reappears.
+        """
+        self.clear()
         try: self._q.put_nowait(None)
         except Exception: pass
 
@@ -1098,12 +1127,14 @@ class UIState:
         self.modal_kind            : Optional[str] = None  # None/info/choice
         self.modal_options         : list = []              # list[(id,label)]
         self.modal_sel             : int = 0
+        self.modal_context         : Optional[str] = None  # handler tag for choice modals
         # set True from overlay to abort in-progress dial (ATH / ATZ / NAS)
         self.dial_abort            : bool = False
         # phone pickup joke: effective pipe multiplier over time (ONLINE only)
         # mode: None / 'ALLOW' (drop to 0 and stay) / 'RECOVER' (drop then return)
-        self.phone_pickup_mode     : Optional[str] = None
-        self.phone_pickup_start_ts : float = 0.0
+        self.phone_pickup_mode          : Optional[str] = None
+        self.phone_pickup_start_ts      : float = 0.0
+        self.phone_pickup_disconnected  : bool  = False  # True once ALLOW triggers disconnect
         # one-shot: play V.34-ish retrain swoosh in online loop
         self.pending_retrainFX     : bool = False
         # line-quality injection (from overlay)
@@ -1739,6 +1770,11 @@ def _online_loop():
                 elapsed = now - _state.phone_pickup_start_ts
                 if _state.phone_pickup_mode == "ALLOW":
                     pickup_factor = max(0.0, 1.0 - elapsed / 2.2)
+                    # Once quality is fully gone, drop the connection offline.
+                    if pickup_factor == 0.0 and not _state.phone_pickup_disconnected:
+                        _state.phone_pickup_disconnected = True
+                        _state.inject_disconnect = True
+                        _state.inject_forced_reason = "phone_pickup_allow"
                 else:  # "RECOVER"
                     if elapsed < 2.0:
                         pickup_factor = 1.0 - elapsed / 2.0
@@ -2663,6 +2699,7 @@ def _snapshot() -> dict:
             'modal_kind':         _state.modal_kind,
             'modal_options':     list(_state.modal_options),
             'modal_sel':          _state.modal_sel,
+            'modal_context':      _state.modal_context,
             'throttle_bps':       _state.throttle_bps,
             'isp_ripoff_mult':    _state.isp_ripoff_mult,
             'cust_fightback':     _state.cust_fightback,
@@ -2680,7 +2717,7 @@ _BANNER = [
     " ██║  ██║██║██╔══██║██║     ██║   ██║██╔═══╝",
     " ██████╔╝██║██║  ██║███████╗╚██████╔╝██║    ",
     " ╚═════╝ ╚═╝╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝    ",
-    "   L O C A L   M O D E M   E M U L A T O R   ",
+    "   L O C A L   M O D E M   S I M U L A T O R   ",
 ]
 
 _MODEM_CHARS = {
@@ -3095,28 +3132,32 @@ def _show_modal(title: str, message: str) -> None:
         _state.modal_sel = 0
 
 
-def _show_modal_choice(title: str, message: str, options: List[Tuple[str, str]]) -> None:
+def _show_modal_choice(title: str, message: str, options: List[Tuple[str, str]],
+                       context: str = "phone_pickup") -> None:
     """
     Show a choice modal.
 
     options: list[(option_id, label_to_display)].
+    context: handler tag used by the dispatch loop to route the confirmed choice.
     Dismiss/apply with Enter; cancel with Esc.
     """
     with _state.lock:
-        _state.modal_title = title
+        _state.modal_title   = title
         _state.modal_message = message
-        _state.modal_kind = "choice"
+        _state.modal_kind    = "choice"
         _state.modal_options = list(options)
-        _state.modal_sel = 0
+        _state.modal_sel     = 0
+        _state.modal_context = context
 
 
 def _clear_modal() -> None:
     with _state.lock:
-        _state.modal_title = None
+        _state.modal_title   = None
         _state.modal_message = None
-        _state.modal_kind = None
+        _state.modal_kind    = None
         _state.modal_options = []
-        _state.modal_sel = 0
+        _state.modal_sel     = 0
+        _state.modal_context = None
 
 
 def _apply_phone_pickup_choice(choice_id: str) -> None:
@@ -3143,6 +3184,26 @@ def _apply_phone_pickup_choice(choice_id: str) -> None:
             _state.phone_pickup_start_ts = time.time()
         _clog("Operator chose: tell them to stop answering", "OK")
         _ilog("Subscriber line: warning sent, interference abates", "SYS")
+
+
+def _apply_isp_shrink_choice(factor_str: str) -> None:
+    """
+    ISP ripoff shrink-pipe: apply the chosen speed factor.
+    factor_str is the string representation of the target multiplier,
+    e.g. '0.75'.  The result is clamped to [0.1, current] so the ISP
+    can only shrink (never accidentally restore) and never below 0.1.
+    """
+    try:
+        factor = float(factor_str)
+    except ValueError:
+        return
+    factor = max(0.1, factor)
+    with _state.lock:
+        new_mult = max(0.1, round(_state.isp_ripoff_mult * factor, 4))
+        _state.isp_ripoff_mult = new_mult
+        m = new_mult
+    _ilog(f"[REV] hidden throughput factor now ~{m:.2f}  (subscriber pays full)", "SYS")
+    _clog("[FINE PRINT] Performance may not match advertised  --  you agreed", "FAIL")
 
 
 def _apply_overlay_action(tag: str) -> None:
@@ -3226,10 +3287,33 @@ def _apply_overlay_action(tag: str) -> None:
 
     if tag == "isp_ripoff_shrink":
         with _state.lock:
-            _state.isp_ripoff_mult = max(0.25, round(_state.isp_ripoff_mult * 0.87, 4))
-            m = _state.isp_ripoff_mult
-        _ilog(f"[REV] hidden throughput factor now ~{m:.2f}  (subscriber pays full)", "SYS")
-        _clog("[FINE PRINT] Performance may not match advertised  --  you agreed", "FAIL")
+            current = _state.isp_ripoff_mult
+        # Build factor options, only showing those that would produce a result >= 0.1
+        # and would actually lower the current value.
+        candidates = [
+            ("0.9",  "Slight squeeze   (x0.9  of current)"),
+            ("0.75", "Noticeable cut   (x0.75 of current)"),
+            ("0.5",  "Halved           (x0.5  of current)"),
+            ("0.25", "Throttled hard   (x0.25 of current)"),
+            ("0.1",  "Near-zero        (x0.1  of current  -- floor)"),
+        ]
+        options = [
+            (fid, lbl)
+            for fid, lbl in candidates
+            if round(current * float(fid), 4) >= 0.1
+        ]
+        if not options:
+            _show_modal(
+                "Pipe already at minimum",
+                f"Current factor is ~{current:.2f}.  Cannot shrink further (floor: 0.1).",
+            )
+            return
+        _show_modal_choice(
+            "SHRINK PIPE  --  choose factor",
+            f"Current throughput factor: ~{current:.2f}.  Select the new multiplier:",
+            options,
+            context="isp_shrink",
+        )
         return
 
     if tag == "isp_dns_hijack":
@@ -3491,7 +3575,11 @@ def main_loop(stdscr):
                 elif key in (10, 13, curses.KEY_ENTER):
                     if opts and 0 <= sel < len(opts):
                         opt_id, _ = opts[sel]
-                        _apply_phone_pickup_choice(opt_id)
+                        ctx = snap.get("modal_context")
+                        if ctx == "isp_shrink":
+                            _apply_isp_shrink_choice(opt_id)
+                        else:  # default: phone_pickup
+                            _apply_phone_pickup_choice(opt_id)
                     _clear_modal()
             else:
                 if key in (10, 13, curses.KEY_ENTER):
@@ -3617,7 +3705,7 @@ def main_loop(stdscr):
         render_line (w_line, PHONE_H, mx,   snap, frame)
 
         if snap['done']:
-            _audio.stop()   # stop sounds immediately; don't wait for keypress
+            _audio.silence()   # drain queue + close stdin; no SIGCHLD fired here
             msg  = "  Session ended.  Press any key to exit.  "
             msg_y = my // 2
             msg_x = max(0, (mx - len(msg)) // 2)
@@ -3630,6 +3718,7 @@ def main_loop(stdscr):
             curses.doupdate()
             stdscr.nodelay(False)
             stdscr.getch()
+            _audio.stop()   # aplay already exiting; join thread, final cleanup
             break
 
         w_cust.noutrefresh()
