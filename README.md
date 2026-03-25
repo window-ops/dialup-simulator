@@ -2,7 +2,7 @@
 
 **NOTE: THIS PROGRAM HAS BEEN MADE WITH THE ASSISTANCE OF MULTIPLE AIs. THIS PROGRAM WAS TESTED MULTIPLE TIMES DURING DEVELOPMENT.**
 
-Dial-up modem emulator (single file) - local two-sided V.90 / ISDN simulation.
+Dial-up modem simulator (single file) - local two-sided V.90 / ISDN simulation.
 
 This program is intended to run on Linux only. It uses the terminal curses API and spawns ALSA 'aplay' via subprocess for real-time PCM; paths and utilities are not abstracted for Windows or macOS. Making it cross-platform would require a different audio sink (native APIs or a portable library), TUI adjustments, and validation on those OSes.
 
