@@ -2746,6 +2746,8 @@ def startup_menu(stdscr) -> tuple:
     sel_mod      = 0
     sel_fail     = 0
     sel_num      = 0
+    _CUSTOM_NUM_IDX = len(ISP_NUMBERS) - 1   # last entry is the editable custom slot
+    custom_num   = ISP_NUMBERS[_CUSTOM_NUM_IDX][0]   # starts with the default placeholder
     sel_attempts = 4
     debug        = False
 
@@ -2872,14 +2874,23 @@ def startup_menu(stdscr) -> tuple:
 
         # ── ISP phone number ──────────────────────────────────────────────────
         nlc = _CG if focus == 2 else _CW
+        editing_custom = (focus == 2 and sel_num == _CUSTOM_NUM_IDX)
+        num_hint = "type number  Bksp=delete  Tab=next" if editing_custom else "↑↓ select  Tab=next"
         _boxrow(stdscr, cy, box_x, len(ISP_NUMBERS)+2, box_w, nlc,
-                "ISP PHONE NUMBER  [↑↓ select  Tab=next]")
+                f"ISP PHONE NUMBER  [{num_hint}]")
         for i, (num, lbl) in enumerate(ISP_NUMBERS):
+            is_custom = (i == _CUSTOM_NUM_IDX)
             cursor = "▶ " if i == sel_num else "  "
             attr   = curses.color_pair(_CY)|curses.A_BOLD if i == sel_num \
                      else curses.color_pair(_CW)
-            _sarow(stdscr, cy+1+i, box_x+2,
-                   f"{cursor}{num:<14}  {lbl}"[:box_w-4], attr)
+            if is_custom:
+                display_num = (custom_num + "_") if editing_custom else custom_num
+                _, lbl_suffix = lbl.split("--", 1)
+                _sarow(stdscr, cy+1+i, box_x+2,
+                       f"{cursor}{display_num:<15} custom --{lbl_suffix}"[:box_w-4], attr)
+            else:
+                _sarow(stdscr, cy+1+i, box_x+2,
+                       f"{cursor}{num:<14}  {lbl}"[:box_w-4], attr)
         cy += len(ISP_NUMBERS) + 3
 
         # ── Failure preset ────────────────────────────────────────────────────
@@ -2931,7 +2942,7 @@ def startup_menu(stdscr) -> tuple:
         snd_lbl = _SOUND_SCHEMES[sel_snd][0]
         _draw_accordion_hdr(cy, "ADVANCED: SOUND SCHEME",
                             adv_snd_open, focus == 5, _CM,
-                            hint="Space=expand  ↑↓ select  Tab=next",
+                            hint="Space=expand  ↑↓ cycle  Tab=next",
                             extra=f"  [{snd_lbl}]")
         cy += 1
         if adv_snd_open:
@@ -3026,6 +3037,7 @@ def startup_menu(stdscr) -> tuple:
             if   focus == 0: sel_mod = max(0, sel_mod - 1)
             elif focus == 2: sel_num = max(0, sel_num - 1)
             elif focus == 4 and adv_err_open: adv_err_sel = max(0, adv_err_sel - 1)
+            elif focus == 5 and adv_snd_open: sel_snd = max(0, sel_snd - 1)
             elif focus == 6 and adv_ml_open:  adv_ml_sub  = max(0, adv_ml_sub - 1)
             else: menu_scroll = max(0, menu_scroll - 1)
         if key == curses.KEY_DOWN:
@@ -3033,6 +3045,7 @@ def startup_menu(stdscr) -> tuple:
             elif focus == 2: sel_num = min(len(ISP_NUMBERS)-1, sel_num + 1)
             elif focus == 4 and adv_err_open:
                 adv_err_sel = min(len(_FAIL_SCENARIOS)-1, adv_err_sel + 1)
+            elif focus == 5 and adv_snd_open: sel_snd = min(len(_SOUND_SCHEMES)-1, sel_snd + 1)
             elif focus == 6 and adv_ml_open:
                 adv_ml_sub = min(1, adv_ml_sub + 1)
             else: menu_scroll = min(max(0, total_content_h - avail_h),
@@ -3042,7 +3055,6 @@ def startup_menu(stdscr) -> tuple:
             elif focus == 3: sel_attempts = max(1, sel_attempts - 1)
             elif focus == 4 and adv_err_open:
                 sc_weights[adv_err_sel] = round(max(0.0, sc_weights[adv_err_sel] - 0.5), 1)
-            elif focus == 5 and adv_snd_open: sel_snd = max(0, sel_snd - 1)
             elif focus == 6 and adv_ml_open:
                 if adv_ml_sub == 0: ml_count = max(1, ml_count - 1)
                 else:               ml_mode  = max(0, ml_mode  - 1)
@@ -3051,10 +3063,18 @@ def startup_menu(stdscr) -> tuple:
             elif focus == 3: sel_attempts = min(20, sel_attempts + 1)
             elif focus == 4 and adv_err_open:
                 sc_weights[adv_err_sel] = round(min(5.0, sc_weights[adv_err_sel] + 0.5), 1)
-            elif focus == 5 and adv_snd_open: sel_snd = min(len(_SOUND_SCHEMES)-1, sel_snd + 1)
             elif focus == 6 and adv_ml_open:
                 if adv_ml_sub == 0: ml_count = min(20, ml_count + 1)
                 else:               ml_mode  = min(1,  ml_mode  + 1)
+        # Custom number text entry: when focused on ISP number and custom slot selected,
+        # printable characters are appended and backspace removes the last character.
+        if focus == 2 and sel_num == _CUSTOM_NUM_IDX:
+            if key in (curses.KEY_BACKSPACE, 127, 8):
+                custom_num = custom_num[:-1]
+            elif 0 <= key <= 0x10ffff and chr(key) in '0123456789-()+': # allowlist: digits and valid phone punctuation only
+                if len(custom_num) < 20:
+                    custom_num += chr(key)
+
         # Page Up/Down scrolls the menu
         if key == curses.KEY_PPAGE:
             menu_scroll = max(0, menu_scroll - (avail_h // 2))
@@ -3082,13 +3102,13 @@ def startup_menu(stdscr) -> tuple:
             try: curses.getmouse()
             except curses.error: pass
         if key in (ord('q'), ord('Q')):
-            return None, None, None, None, False, None, 0, 1, 0
+            return None, None, None, None, False, None, 0, 1, 0, ""
 
     _scheme_idx                             = sel_snd
     _, _scheme_noise_mult, _scheme_jitter_mult, _scheme_force_silent = _SOUND_SCHEMES[sel_snd]
 
     return (sel_mod, sel_fail, sel_num, sel_attempts, debug,
-            sc_weights, sel_snd, ml_count, ml_mode)
+            sc_weights, sel_snd, ml_count, ml_mode, custom_num)
 
 
 
@@ -3751,12 +3771,17 @@ def run(stdscr):
         _audio.stop()
         return
     (prof_idx, fail_idx, num_idx, max_attempts, debug,
-     sc_weights, snd_idx, ml_count, ml_mode) = result
+     sc_weights, snd_idx, ml_count, ml_mode, custom_num) = result
 
+    _CUSTOM_NUM_IDX = len(ISP_NUMBERS) - 1
     profile    = PROFILES[prof_idx]
     fail_prob  = FAIL_OPTIONS[fail_idx][1]
-    isp_number, isp_lbl_full = ISP_NUMBERS[num_idx]
-    isp_label  = isp_lbl_full.split("--")[0].strip()
+    if num_idx == _CUSTOM_NUM_IDX:
+        isp_number = custom_num if custom_num.strip() else ISP_NUMBERS[_CUSTOM_NUM_IDX][0]
+        isp_label  = "custom"
+    else:
+        isp_number, isp_lbl_full = ISP_NUMBERS[num_idx]
+        isp_label  = isp_lbl_full.split("--")[0].strip()
 
     _state = UIState(profile, fail_prob,
                      isp_number=isp_number, isp_label=isp_label,
