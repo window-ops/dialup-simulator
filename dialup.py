@@ -104,7 +104,7 @@ def _profile_speed_bps(profile: "ModemProfile") -> int:
 # AUDIO ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 SR  = 8000          # sample rate Hz
-AMP = 26000         # peak amplitude  (clipping at ±32767)
+AMP = 26000         # peak amplitude
 
 # global volume multiplier (0.0 – 2.0), modified by +/- keys
 _vol     = 1.0
